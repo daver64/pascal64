@@ -3,6 +3,7 @@ project(Pascal64 VERSION 0.1 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_library(p64rt STATIC runtime/runtime.cpp)
+add_subdirectory(simlib)
 add_executable(p64 src/main.cpp src/parser.cpp src/semantic.cpp src/codegen.cpp)
 target_compile_definitions(p64 PRIVATE P64_RUNTIME_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -19,6 +20,9 @@ if(CLANG_EXECUTABLE)
  add_test(NAME compile_primes COMMAND p64 ${CMAKE_CURRENT_SOURCE_DIR}/examples/primes.pas -o ${CMAKE_CURRENT_BINARY_DIR}/primes --clang ${CLANG_EXECUTABLE})
  add_test(NAME run_primes COMMAND ${CMAKE_CURRENT_BINARY_DIR}/primes)
  set_tests_properties(run_primes PROPERTIES DEPENDS compile_primes PASS_REGULAR_EXPRESSION "2 3 5 7 11")
+ add_test(NAME compile_simlib_smoke COMMAND p64 ${CMAKE_CURRENT_SOURCE_DIR}/examples/simlib_smoke.pas -o ${CMAKE_CURRENT_BINARY_DIR}/simlib_smoke --clang ${CLANG_EXECUTABLE} --unit-path ${CMAKE_CURRENT_SOURCE_DIR}/units --link $<TARGET_FILE:p64simlib>)
+ add_test(NAME run_simlib_smoke COMMAND ${CMAKE_CURRENT_BINARY_DIR}/simlib_smoke)
+ set_tests_properties(run_simlib_smoke PROPERTIES DEPENDS compile_simlib_smoke PASS_REGULAR_EXPRESSION "SimLib backend: (stub|rsimlib)")
  add_test(NAME milestone2 COMMAND ${CMAKE_COMMAND}
   -DP64=$<TARGET_FILE:p64> -DCLANG=${CLANG_EXECUTABLE}
   -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/routines.pas -DRECORD_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/records.pas -DARRAY_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/arrays.pas -DSTRING_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/strings.pas -DCLASS_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/classes.pas -DFFI_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/ffi.pas -DFFI_LIBRARY=$<TARGET_FILE:p64testffi> -DUNIT_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/units.pas -DUNIT_PATH=${CMAKE_CURRENT_SOURCE_DIR}/tests/units -DWORK=${CMAKE_CURRENT_BINARY_DIR}

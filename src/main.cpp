@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <cstring>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -97,7 +98,16 @@ int main(int argc, char** argv) {
     if (!out) throw std::runtime_error("cannot write " + llvm);
     std::vector<std::string> command{clang, "-Wno-override-module", "-fexceptions", "-funwind-tables", llvm, "-o", output};
     if (debug) command.push_back("-g");
-    for (const auto& linkInput : linkInputs) command.push_back(linkInput);
+    for (const auto& linkInput : linkInputs) {
+      command.push_back(linkInput);
+      if (linkInput.size() > 3 && linkInput.ends_with(".so")) {
+        std::filesystem::path libPath(linkInput);
+        auto parent = libPath.parent_path();
+        if (!parent.empty()) {
+          command.push_back(std::string("-Wl,-rpath,") + parent.string());
+        }
+      }
+    }
     command.push_back(std::string("-L") + P64_RUNTIME_DIR); command.push_back("-lp64rt"); command.push_back("-lstdc++");
     if (verbose) {
       std::cerr << "clang:";

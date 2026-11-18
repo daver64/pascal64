@@ -89,7 +89,7 @@ extern "C" ManagedString* p64_read_line() {
   }
 
   std::size_t length = static_cast<std::size_t>(read);
-  while (length && (line[length - 1] == n || line[length - 1] == r)) --length;
+  while (length && (line[length - 1] == '\n' || line[length - 1] == '\r')) --length;
   auto* value = stringAlloc(line, length);
   std::free(line);
   return value;
@@ -97,7 +97,7 @@ extern "C" ManagedString* p64_read_line() {
 
 namespace {
 [[noreturn]] void parseFail(int line, const char* kind, const char* text) {
-  std::fprintf(stderr, "line %d: invalid %s %s\n", line, kind, text ? text : "");
+  std::fprintf(stderr, "line %d: invalid %s '%s'\n", line, kind, text ? text : "");
   std::exit(EXIT_FAILURE);
 }
 

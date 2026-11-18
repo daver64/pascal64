@@ -43,6 +43,10 @@ currently supported language subset.
 ./build/p64 examples/files_demo.pas -o build/files_demo --unit-path units --clang clang-18
 ./build/p64 examples/args_demo.pas -o build/args_demo --unit-path units --clang clang-18
 ./build/p64 examples/env_demo.pas -o build/env_demo --unit-path units --clang clang-18
+./build/p64 examples/readln_demo.pas -o build/readln_demo --clang clang-18
+
+# Requires GTK3 installed.
+./build/p64 examples/vcl_hello.pas -o build/vcl_hello --unit-path units --clang clang-18 --link -lgtk-3 --link -lgobject-2.0
 ```
 
 Run the arguments example:
@@ -159,6 +163,18 @@ For a friendlier display in GDB, you can load the included pretty-printer:
   Free each wrapper exactly once; their GTK widget handles stay referenced until
   the wrapper is freed, even if a containing window has already been destroyed.
   Callbacks are program- or unit-scope routines, not bound object methods.
+- A small VCL-like layer backed by GTK3 lives in `units/p64vcl.pas`, with a demo in
+  `examples/vcl_hello.pas`. It provides `TApplication`, `TForm`, and `TButton` with
+  `OnClick`/`OnClose` events.
+- A stub C-ABI wrapper library lives in `simlib/` and is exposed to Pascal via
+  `units/p64simlib.pas`, with a smoke-test program in `examples/simlib_smoke.pas`.
+  This is scaffolding for wrapping a C++17 library (for example `rsimlib`) behind
+  a stable C ABI.
+  To build it against a local `rsimlib` checkout, configure with:
+  `cmake -S . -B build -DP64_USE_RSIMLIB=ON -DP64_RSIMLIB_DIR=/home/dave/Documents/Projects/rsimlib`.
+  A small windowed clear-screen loop example is in `examples/simlib_clear.pas`.
+- `ReadLn` reads a single line from stdin into a `String`, `Integer`, `Int64`, or `Real`
+  variable.
 - `Write` and `WriteLn` accept integers, reals, strings and string literals. Comments use
   `{...}` or `(*...*)`; identifiers are case-insensitive.
 
@@ -192,6 +208,11 @@ and code generator include unwind cleanup for managed temporaries and locals.
 
 The frontend separates parsing into an AST, semantic analysis and LLVM IR
 generation. Nested routines access enclosing locals through lexical frames.
+
+Pascal64's official graphics API is `simlib` (via the optional `p64simlib` C ABI
+wrapper). The long-term plan is to build Delphi-style UI and VCL-like layers on
+top of it (and/or GTK3), but for games and immediate-mode rendering, `simlib` is
+the primary target.
 
 1. Establish the compiler pipeline and basic Pascal subset (done).
 2. Expand the structured frontend, types and routines (in progress; additional
