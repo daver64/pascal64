@@ -40,7 +40,7 @@ begin
   begin
     while SimLib_PollEvent(event) <> 0 do
     begin
-      if SimLib_EventType(event) = SimLib_EventQuit() then
+      if SimLib_EventType(event) = SimLib_EventTypeQuit() then
         running := 0;
       SimLib_DisplayHandleEvent(event);
     end;

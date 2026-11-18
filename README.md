@@ -166,13 +166,23 @@ For a friendlier display in GDB, you can load the included pretty-printer:
 - A small VCL-like layer backed by GTK3 lives in `units/p64vcl.pas`, with a demo in
   `examples/vcl_hello.pas`. It provides `TApplication`, `TForm`, and `TButton` with
   `OnClick`/`OnClose` events.
-- A stub C-ABI wrapper library lives in `simlib/` and is exposed to Pascal via
-  `units/p64simlib.pas`, with a smoke-test program in `examples/simlib_smoke.pas`.
-  This is scaffolding for wrapping a C++17 library (for example `rsimlib`) behind
-  a stable C ABI.
+- A C-ABI wrapper library lives in `simlib/` and is exposed to Pascal via
+  `units/p64simlib.pas`.
+  It can be built against the C++17 `rsimlib` project (recommended) or fall back
+  to a stub backend.
   To build it against a local `rsimlib` checkout, configure with:
   `cmake -S . -B build -DP64_USE_RSIMLIB=ON -DP64_RSIMLIB_DIR=/home/dave/Documents/Projects/rsimlib`.
-  A small windowed clear-screen loop example is in `examples/simlib_clear.pas`.
+  Example programs include `examples/simlib_smoke.pas`, `examples/simlib_clear.pas`,
+  `examples/simlib_texture_demo.pas`, `examples/simlib_text_demo.pas`,
+  `examples/simlib_text_input_demo.pas`, `examples/simlib_save_bitmap_demo.pas`,
+  `examples/simlib_sprite_ex_demo.pas`, `examples/simlib_sprite_batch_demo.pas` and
+  `examples/simlib_render_target_demo.pas`.
+
+  For more Delphi-ish ergonomics, `units/p64graphics.pas` provides `TBitmap`,
+  `TSpriteBatch`, `TFont`, `TColour` (British spelling) and `TApplication`, plus
+  small drawing helpers, with demos in
+  `examples/p64graphics_demo.pas`, `examples/p64graphics_app_demo.pas` and
+  `examples/p64graphics_text_demo.pas`.
 - `ReadLn` reads a single line from stdin into a `String`, `Integer`, `Int64`, or `Real`
   variable.
 - `Write` and `WriteLn` accept integers, reals, strings and string literals. Comments use
@@ -213,6 +223,9 @@ Pascal64's official graphics API is `simlib` (via the optional `p64simlib` C ABI
 wrapper). The long-term plan is to build Delphi-style UI and VCL-like layers on
 top of it (and/or GTK3), but for games and immediate-mode rendering, `simlib` is
 the primary target.
+
+For Delphi-ish ergonomics, `units/p64graphics.pas` provides `TBitmap`,
+`TSpriteBatch` and `TColour` wrappers over `P64SimLib`.
 
 1. Establish the compiler pipeline and basic Pascal subset (done).
 2. Expand the structured frontend, types and routines (in progress; additional
