@@ -54,7 +54,10 @@ bool assignable(Type destination, Type source) {
          ((pointer(destination) || destination.kind == Type::Callback || destination.kind == Type::Class) && source == Type::Nil) || (destination == Type::PChar && source == Type::String) ||
          (destination == Type::ManagedString && (source == Type::String || source == Type::PChar)) ||
          classAssignable(destination, source) ||
-         (destination == Type::Pointer && source == Type::PChar);
+         (destination == Type::Pointer && source == Type::PChar) ||
+         (destination == Type::PChar && source == Type::Pointer) ||
+         (destination == Type::Pointer && source.kind == Type::Class) ||
+         (destination.kind == Type::Class && source == Type::Pointer);
 }
 
 class Analyzer {
@@ -199,6 +202,9 @@ class Analyzer {
     if (destination.kind == Type::Real && integer(source)) return 1;
     if ((destination == Type::Pointer || destination == Type::PChar || destination.kind == Type::Callback || destination.kind == Type::Class) && source == Type::Nil) return 1;
     if (destination == Type::Pointer && source == Type::PChar) return 1;
+    if (destination == Type::PChar && source == Type::Pointer) return 1;
+    if (destination == Type::Pointer && source.kind == Type::Class) return 1;
+    if (destination.kind == Type::Class && source == Type::Pointer) return 1;
     if (destination == Type::PChar && source == Type::String) return 1;
     if (destination == Type::PChar && source == Type::ManagedString) return 2;
     if (destination == Type::ManagedString && source == Type::String) return 1;
@@ -356,8 +362,10 @@ class Analyzer {
       prepare(*child);
     }
   }
-  Type selectedType(Routine& scope, Type type, std::vector<Selector>& selectors) {
-    for (auto& selector : selectors) {
+  Type selectedType(Routine& scope, Type type, std::vector<Selector>& selectors, size_t end = SIZE_MAX) {
+    if (end > selectors.size()) end = selectors.size();
+    for (size_t index = 0; index < end; ++index) {
+      auto& selector = selectors[index];
       if (selector.index) {
         if (type.kind != Type::Array) error(selector.line, "indexing requires an array");
         if (!integer(expression(scope, *selector.index))) error(selector.line, "array index must be an integer");
@@ -442,6 +450,28 @@ class Analyzer {
     target = best;
     (void)checkArguments(scope, name, line, arguments, target, value, 0);
   }
+
+  void callCallbackVariable(Routine& scope, const std::string& name, int line, std::vector<std::unique_ptr<Expr>>& arguments,
+                            const CallbackType& signature, bool value) {
+    if (!value && signature.result != Type::Void) error(line, "function return value may not be discarded");
+    if (arguments.size() != signature.parameters.size()) error(line, "wrong number of arguments for '" + name + "'");
+    for (size_t index = 0; index < arguments.size(); ++index) {
+      const auto& parameter = *signature.parameters[index];
+      Type actual = expression(scope, *arguments[index], parameter.type);
+      if (parameter.byReference && (arguments[index]->kind != Expr::Kind::Name || !arguments[index]->variable))
+        error(arguments[index]->line, "var argument must be a variable");
+      if (parameter.byReference && arguments[index]->variable) {
+        for (const auto* control : loopControlVariables)
+          if (control == arguments[index]->variable)
+            error(arguments[index]->line, "loop control variable must not be modified");
+      }
+      if (!parameter.byReference && parameter.type == Type::PChar && actual == Type::ManagedString) {
+        // Allow passing managed strings to PChar parameters (C APIs).
+        // The pointer is only guaranteed valid during the call.
+      } else if (parameter.byReference ? parameter.type != actual : !assignable(parameter.type, actual))
+        error(arguments[index]->line, "incompatible argument type for '" + name + "'");
+    }
+  }
   void methodCall(Routine& scope, const std::string& name, int line, std::vector<Selector>& selectors,
                   std::vector<std::unique_ptr<Expr>>& arguments, Variable*& variable, Routine*& target, bool value) {
     if (selectors.empty() || selectors.back().index) error(line, "method call requires a method name");
@@ -503,11 +533,38 @@ class Analyzer {
         if (expr.type.kind != Type::Class) error(expr.line, "unknown class '" + expr.text + "'");
         construct(scope, expr);
       } else {
-        methodCall(scope, expr.text, expr.line, expr.selectors, expr.operands, expr.variable, expr.routine, true);
-        expr.type = expr.routine->result;
+        // Either a method call (`object.Method(...)`) or a callback field call (`object.OnEvent(...)`).
+        expr.variable = findVariable(&scope, expr.text);
+        if (!expr.variable) error(expr.line, "unknown variable '" + expr.text + "'");
+        if (expr.selectors.empty() || expr.selectors.back().index) error(expr.line, "method call requires a method name");
+
+        auto methodName = expr.selectors.back().name;
+        Type receiverType = selectedType(scope, expr.variable->type, expr.selectors, expr.selectors.size() - 1);
+
+        bool hasMethod = false;
+        if (receiverType.kind == Type::Class) {
+          for (auto* record = receiverType.record; record && !hasMethod; record = record->base)
+            for (auto& method : record->methods) if (method->name == methodName) { hasMethod = true; break; }
+        }
+
+        if (hasMethod) {
+          methodCall(scope, expr.text, expr.line, expr.selectors, expr.operands, expr.variable, expr.routine, true);
+          expr.type = expr.routine->result;
+        } else {
+          try {
+            Type calleeType = selectedType(scope, expr.variable->type, expr.selectors);
+            if (calleeType.kind != Type::Callback) error(expr.line, "unknown class method '" + methodName + "'");
+            callCallbackVariable(scope, methodName, expr.line, expr.operands, *calleeType.callback, true);
+            expr.kind = Expr::Kind::CallbackCall;
+            expr.type = calleeType.callback->result;
+          } catch (const std::runtime_error&) {
+            error(expr.line, "unknown class method '" + methodName + "'");
+          }
+        }
       }
       break;
     }
+    case Expr::Kind::CallbackCall: break;
     case Expr::Kind::NewObject: break;
     case Expr::Kind::RoutineAddress: {
       if (expected.kind != Type::Callback) error(expr.line, "routine address requires a callback type");
@@ -589,8 +646,16 @@ class Analyzer {
       }
       break;
     case Expr::Kind::Call:
-      call(scope, expr.text, expr.line, expr.operands, expr.routine, true);
-      expr.type = expr.routine->result;
+      if (!findRoutines(&scope, expr.text).empty()) {
+        call(scope, expr.text, expr.line, expr.operands, expr.routine, true);
+        expr.type = expr.routine->result;
+      } else {
+        expr.variable = findVariable(&scope, expr.text);
+        if (!expr.variable || expr.variable->type.kind != Type::Callback)
+          error(expr.line, "unknown routine '" + expr.text + "'");
+        callCallbackVariable(scope, expr.text, expr.line, expr.operands, *expr.variable->type.callback, true);
+        expr.type = expr.variable->type.callback->result;
+      }
       if (!expr.selectors.empty()) expr.type = selectedType(scope, expr.type, expr.selectors);
       break;
     case Expr::Kind::Unary: {
@@ -647,7 +712,14 @@ class Analyzer {
       if (!assignable(stmt.targetType, expression(scope, *stmt.expressions[0], stmt.targetType))) error(stmt.line, "incompatible assignment to '" + stmt.text + "'");
       break;
     case Stmt::Kind::Call:
-      call(scope, stmt.text, stmt.line, stmt.expressions, stmt.routine, false);
+      if (!findRoutines(&scope, stmt.text).empty()) {
+        call(scope, stmt.text, stmt.line, stmt.expressions, stmt.routine, false);
+      } else {
+        stmt.variable = findVariable(&scope, stmt.text);
+        if (!stmt.variable || stmt.variable->type.kind != Type::Callback)
+          error(stmt.line, "unknown routine '" + stmt.text + "'");
+        callCallbackVariable(scope, stmt.text, stmt.line, stmt.expressions, *stmt.variable->type.callback, false);
+      }
       break;
     case Stmt::Kind::MethodCall: {
       if (auto* unit = findImportedUnit(scope, stmt.text)) {
@@ -660,15 +732,54 @@ class Analyzer {
         stmt.selectors.clear();
         break;
       }
-      methodCall(scope, stmt.text, stmt.line, stmt.selectors, stmt.expressions, stmt.variable, stmt.routine, false);
+      // Either a method call (`object.Method(...)`) or a callback field call (`object.OnEvent(...)`).
+      stmt.variable = findVariable(&scope, stmt.text);
+      if (!stmt.variable) error(stmt.line, "unknown variable '" + stmt.text + "'");
+      if (stmt.selectors.empty() || stmt.selectors.back().index) error(stmt.line, "method call requires a method name");
+
+      auto methodName = stmt.selectors.back().name;
+      Type receiverType = selectedType(scope, stmt.variable->type, stmt.selectors, stmt.selectors.size() - 1);
+
+      bool hasMethod = false;
+      if (receiverType.kind == Type::Class) {
+        for (auto* record = receiverType.record; record && !hasMethod; record = record->base)
+          for (auto& method : record->methods) if (method->name == methodName) { hasMethod = true; break; }
+      }
+
+      if (hasMethod) {
+        methodCall(scope, stmt.text, stmt.line, stmt.selectors, stmt.expressions, stmt.variable, stmt.routine, false);
+      } else {
+        try {
+          stmt.targetType = selectedType(scope, stmt.variable->type, stmt.selectors);
+          if (stmt.targetType.kind != Type::Callback) error(stmt.line, "unknown class method '" + methodName + "'");
+          callCallbackVariable(scope, methodName, stmt.line, stmt.expressions, *stmt.targetType.callback, false);
+          stmt.kind = Stmt::Kind::CallbackCall;
+        } catch (const std::runtime_error&) {
+          error(stmt.line, "unknown class method '" + methodName + "'");
+        }
+      }
       break;
     }
+    case Stmt::Kind::CallbackCall: break;
     case Stmt::Kind::Destroy:
       if (!stmt.expressions.empty()) error(stmt.line, "Free takes no arguments");
       stmt.variable = findVariable(&scope, stmt.text);
       if (!stmt.variable) error(stmt.line, "unknown variable '" + stmt.text + "'");
       stmt.targetType = selectedType(scope, stmt.variable->type, stmt.selectors);
       if (stmt.targetType.kind != Type::Class) error(stmt.line, "Free requires a class instance");
+      break;
+    case Stmt::Kind::ReadLn:
+      if (stmt.expressions.size() > 1) error(stmt.line, "ReadLn supports at most one argument");
+      if (!stmt.expressions.empty()) {
+        auto& target = *stmt.expressions[0];
+        Type type = expression(scope, target);
+        if (target.kind != Expr::Kind::Name || !target.variable) error(target.line, "ReadLn requires a variable reference");
+        for (const auto* control : loopControlVariables)
+          if (control == target.variable && target.selectors.empty())
+            error(target.line, "loop control variable must not be modified");
+        if (type != Type::ManagedString && type != Type::Int32 && type != Type::Int64 && type.kind != Type::Real)
+          error(target.line, "ReadLn supports Integer, Int64, Real and String variables");
+      }
       break;
     case Stmt::Kind::Write:
       for (auto& expr : stmt.expressions) {
@@ -702,6 +813,13 @@ class Analyzer {
     case Stmt::Kind::Break: case Stmt::Kind::Continue:
       if (!loopDepth) error(stmt.line, stmt.text + " requires a loop");
       break;
+    case Stmt::Kind::Exit:
+      if (!stmt.expressions.empty()) {
+        if (scope.result == Type::Void) error(stmt.line, "Exit with a value requires a function result");
+        stmt.targetType = scope.result;
+        if (!assignable(scope.result, expression(scope, *stmt.expressions[0], scope.result))) error(stmt.line, "incompatible exit value");
+      }
+      break;
     case Stmt::Kind::Raise: break;
     case Stmt::Kind::Try:
     case Stmt::Kind::TryFinally:
@@ -722,7 +840,7 @@ class Analyzer {
     case Expr::Kind::Unary: case Expr::Kind::Binary:
       for (auto& operand : value.operands) validateConstant(scope, *operand);
       return;
-    case Expr::Kind::Call: case Expr::Kind::RoutineAddress: case Expr::Kind::MemberCall: case Expr::Kind::NewObject:
+	case Expr::Kind::Call: case Expr::Kind::RoutineAddress: case Expr::Kind::MemberCall: case Expr::Kind::CallbackCall: case Expr::Kind::NewObject:
       error(value.line, "constant expression cannot call or reference a routine");
     }
   }

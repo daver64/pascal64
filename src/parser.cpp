@@ -88,7 +88,7 @@ class Parser {
   [[noreturn]] void fail(const std::string& message) const { throw std::runtime_error("line " + std::to_string(current().line) + ": " + message + " (found '" + current().text + "')"); }
   void need(const std::string& text) { if (!eat(text)) fail("expected '" + text + "'"); }
   std::string ident() {
-    static const std::unordered_set<std::string> reserved = {"program", "unit", "interface", "implementation", "initialization", "finalization", "uses", "const", "type", "record", "class", "array", "of", "var", "begin", "end", "procedure", "function", "constructor", "destructor", "cdecl", "external", "forward", "if", "then", "else", "while", "do", "repeat", "until", "for", "to", "downto", "break", "continue", "try", "except", "finally", "raise", "div", "mod", "and", "or", "not", "true", "false", "nil", "write", "writeln"};
+	    static const std::unordered_set<std::string> reserved = {"program", "unit", "interface", "implementation", "initialization", "finalization", "uses", "const", "type", "record", "class", "array", "of", "var", "begin", "end", "procedure", "function", "constructor", "destructor", "cdecl", "external", "forward", "if", "then", "else", "while", "do", "repeat", "until", "for", "to", "downto", "break", "continue", "exit", "try", "except", "finally", "raise", "div", "mod", "and", "or", "not", "true", "false", "nil", "write", "writeln", "readln"};
     std::string name = current().text;
     if (name.empty() || !(std::isalpha(static_cast<unsigned char>(name[0])) || name[0] == '_') || reserved.count(name)) fail("expected identifier");
     ++pos; return name;
@@ -411,9 +411,11 @@ class Parser {
       result->kind = Stmt::Kind::Block;
       if (!is("end")) { result->statements.push_back(statement()); while (eat(";")) { if (is("end")) break; result->statements.push_back(statement()); } }
       need("end");
-    } else if (eat("write") || eat("writeln")) {
-      result->kind = Stmt::Kind::Write; result->expressions = arguments();
-    } else if (eat("if")) {
+	    } else if (eat("write") || eat("writeln")) {
+	      result->kind = Stmt::Kind::Write; result->expressions = arguments();
+	    } else if (eat("readln")) {
+	      result->kind = Stmt::Kind::ReadLn; result->expressions = arguments();
+	    } else if (eat("if")) {
       result->kind = Stmt::Kind::If; result->expressions.push_back(expression()); need("then"); result->statements.push_back(statement());
       if (eat("else")) result->statements.push_back(statement());
     } else if (eat("while")) {
@@ -427,6 +429,13 @@ class Parser {
       need("until"); result->expressions.push_back(expression());
     } else if (eat("break")) result->kind = Stmt::Kind::Break;
     else if (eat("continue")) result->kind = Stmt::Kind::Continue;
+    else if (eat("exit")) {
+      result->kind = Stmt::Kind::Exit;
+      if (eat("(")) {
+        result->expressions.push_back(expression());
+        need(")");
+      }
+    }
     else if (eat("raise")) result->kind = Stmt::Kind::Raise;
     else if (eat("try")) {
       auto parseStatementList = [&](const auto& isTerminator) {

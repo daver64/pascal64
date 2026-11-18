@@ -57,6 +57,7 @@ class Generator {
   std::string unwindHandler;
   std::string metadata;
   std::vector<int> debugGlobals;
+  std::vector<std::string> exitLabels;
   std::vector<std::pair<std::string, std::string>> loops;
   const Routine* current = nullptr;
   int reg = 0, label = 0, stringId = 0;
@@ -306,7 +307,11 @@ class Generator {
     if (target == Type::ManagedString && value.type == Type::String) return track({target, instruction("call ptr @p64_string_new(ptr " + value.name + ")"), true});
     if (target == Type::ManagedString && value.type == Type::PChar) return track({target, instruction("call ptr @p64_string_new(ptr " + value.name + ")"), true});
     if ((target == Type::Pointer || target == Type::PChar || target.kind == Type::Callback || target.kind == Type::Class) && value.type == Type::Nil) return {target, value.name};
-    if ((target == Type::PChar && value.type == Type::String) || (target == Type::Pointer && value.type == Type::PChar)) return {target, value.name};
+    if ((target == Type::PChar && value.type == Type::String) || (target == Type::Pointer && value.type == Type::PChar) ||
+        (target == Type::PChar && value.type == Type::Pointer) ||
+        (target == Type::Pointer && value.type.kind == Type::Class) ||
+        (target.kind == Type::Class && value.type == Type::Pointer))
+      return {target, value.name};
     throw std::logic_error("invalid conversion");
   }
   void manageValue(const Value& value, bool retain) {
@@ -362,6 +367,37 @@ class Generator {
     std::vector<Value> transferred;
     std::vector<Value> postRelease;
   };
+
+  BuiltCall buildCallbackCall(const std::string& symbol, const CallbackType& signature,
+                             const std::vector<std::unique_ptr<Expr>>& arguments) {
+    BuiltCall result;
+    for (size_t index = 0; index < arguments.size(); ++index) {
+      const auto& parameter = *signature.parameters[index];
+      if (!result.args.empty()) result.args += ", ";
+      if (parameter.byReference) result.args += "ptr " + address(arguments[index]->variable, arguments[index]->selectors);
+      else {
+        if (parameter.type == Type::PChar) {
+          auto value = expression(*arguments[index]);
+          if (value.type == Type::ManagedString) {
+            if (!value.owned) { manageValue(value, true); value.owned = true; value = track(value); }
+            auto cstr = instruction("call ptr @p64_string_cstr(ptr " + value.name + ")");
+            result.args += "ptr " + cstr;
+            result.postRelease.push_back(value);
+          } else {
+            value = convert(value, Type::PChar);
+            result.args += "ptr " + value.name;
+          }
+        } else {
+          auto value = convert(expression(*arguments[index]), parameter.type);
+          if (needsManagement(value.type) && !value.owned) { manageValue(value, true); value.owned = true; value = track(value); }
+          result.args += llvmType(value.type) + " " + value.name;
+          if (value.owned) result.transferred.push_back(value);
+        }
+      }
+    }
+    result.symbol = symbol;
+    return result;
+  }
 
   BuiltCall buildCall(const Routine* routine, const std::vector<std::unique_ptr<Expr>>& arguments, const std::string& receiver = {}, const std::string& dispatch = {}) {
     BuiltCall result;
@@ -420,6 +456,38 @@ class Generator {
     for (const auto& value : built.postRelease) release(value);
   }
 
+  void callCallbackStatementSymbol(const std::string& symbol, const CallbackType& signature,
+                                   const std::vector<std::unique_ptr<Expr>>& arguments) {
+    auto built = buildCallbackCall(symbol, signature, arguments);
+    if (tryHandlers.empty()) {
+      if (signature.result == Type::Void)
+        emit("call void " + built.symbol + "(" + built.args + ")");
+      else {
+        auto ignored = "%r" + std::to_string(++reg);
+        emit(ignored + " = call " + llvmType(signature.result) + " " + built.symbol + "(" + built.args + ")");
+      }
+      for (const auto& value : built.transferred) transfer(value);
+      for (const auto& value : built.postRelease) release(value);
+      return;
+    }
+    auto normal = newLabel();
+    if (signature.result == Type::Void)
+      emit("invoke void " + built.symbol + "(" + built.args + ") to label %" + normal + " unwind label %" + tryHandlers.back());
+    else {
+      auto ignored = "%r" + std::to_string(++reg);
+      emit(ignored + " = invoke " + llvmType(signature.result) + " " + built.symbol + "(" + built.args + ") to label %" + normal + " unwind label %" + tryHandlers.back());
+    }
+    mark(normal);
+    for (const auto& value : built.transferred) transfer(value);
+    for (const auto& value : built.postRelease) release(value);
+  }
+
+  void callCallbackStatement(const Variable* callback, const CallbackType& signature,
+                             const std::vector<std::unique_ptr<Expr>>& arguments) {
+    auto fn = instruction("load ptr, ptr " + address(callback, {}));
+    callCallbackStatementSymbol(fn, signature, arguments);
+  }
+
   Value callValue(const Routine* routine, const std::vector<std::unique_ptr<Expr>>& arguments, const std::string& receiver = {}, const std::string& dispatch = {}) {
     auto built = buildCall(routine, arguments, receiver, dispatch);
 
@@ -439,6 +507,34 @@ class Generator {
 
     Value value{routine->result, result, needsManagement(routine->result)};
     return track(value);
+  }
+
+  Value callCallbackValueSymbol(const std::string& symbol, const CallbackType& signature,
+                                const std::vector<std::unique_ptr<Expr>>& arguments) {
+    auto built = buildCallbackCall(symbol, signature, arguments);
+
+    std::string result;
+    if (tryHandlers.empty()) {
+      result = instruction("call " + llvmType(signature.result) + " " + built.symbol + "(" + built.args + ")");
+      for (const auto& value : built.transferred) transfer(value);
+      for (const auto& value : built.postRelease) release(value);
+    } else {
+      auto normal = newLabel();
+      result = "%r" + std::to_string(++reg);
+      emit(result + " = invoke " + llvmType(signature.result) + " " + built.symbol + "(" + built.args + ") to label %" + normal + " unwind label %" + tryHandlers.back());
+      mark(normal);
+      for (const auto& value : built.transferred) transfer(value);
+      for (const auto& value : built.postRelease) release(value);
+    }
+
+    Value value{signature.result, result, needsManagement(signature.result)};
+    return track(value);
+  }
+
+  Value callCallbackValue(const Variable* callback, const CallbackType& signature,
+                          const std::vector<std::unique_ptr<Expr>>& arguments) {
+    auto fn = instruction("load ptr, ptr " + address(callback, {}));
+    return callCallbackValueSymbol(fn, signature, arguments);
   }
 
   void methodCallStatement(const Routine* method, const Variable* variable, const std::vector<Selector>& selectors,
@@ -483,6 +579,11 @@ class Generator {
       return {expr.type, object};
     }
     case Expr::Kind::MemberCall: return methodCallValue(expr.routine, expr.variable, expr.selectors, expr.operands, expr.line);
+    case Expr::Kind::CallbackCall: {
+      auto fn = instruction("load ptr, ptr " + address(expr.variable, expr.selectors));
+      const auto* signature = expr.selectors.back().field->type.callback;
+      return callCallbackValueSymbol(fn, *signature, expr.operands);
+    }
     case Expr::Kind::RoutineAddress: return {expr.type, "@p64cb" + std::to_string(expr.routine->id)};
     case Expr::Kind::Name: {
       auto value = instruction("load " + llvmType(expr.type) + ", ptr " + address(expr.variable, expr.selectors));
@@ -490,7 +591,9 @@ class Generator {
       if (result.owned) manageValue(result, true);
       return track(result);
     }
-    case Expr::Kind::Call: return select(callValue(expr.routine, expr.operands), expr.selectors, expr.type);
+    case Expr::Kind::Call:
+      if (expr.routine) return select(callValue(expr.routine, expr.operands), expr.selectors, expr.type);
+      return select(callCallbackValue(expr.variable, *expr.variable->type.callback, expr.operands), expr.selectors, expr.type);
     case Expr::Kind::Unary: {
       auto operand = expression(*expr.operands[0]);
       if (expr.text == "+") return operand;
@@ -583,7 +686,15 @@ class Generator {
       emit("store " + llvmType(value.type) + " " + value.name + ", ptr " + target);
       transfer(value); break;
     }
-    case Stmt::Kind::Call: callStatement(stmt.routine, stmt.expressions); break;
+    case Stmt::Kind::Call:
+	      if (stmt.routine) callStatement(stmt.routine, stmt.expressions);
+	      else callCallbackStatement(stmt.variable, *stmt.variable->type.callback, stmt.expressions);
+	      break;
+    case Stmt::Kind::CallbackCall: {
+      auto fn = instruction("load ptr, ptr " + address(stmt.variable, stmt.selectors));
+      callCallbackStatementSymbol(fn, *stmt.targetType.callback, stmt.expressions);
+      break;
+    }
     case Stmt::Kind::MethodCall: methodCallStatement(stmt.routine, stmt.variable, stmt.selectors, stmt.expressions, stmt.line); break;
     case Stmt::Kind::Destroy: {
       auto object = instruction("load ptr, ptr " + address(stmt.variable, stmt.selectors));
@@ -608,6 +719,43 @@ class Generator {
       }
       if (stmt.text == "writeln") emit("call void @p64_newline()");
       break;
+    case Stmt::Kind::ReadLn: {
+      auto line = track({Type::ManagedString, instruction("call ptr @p64_read_line()"), true});
+      if (stmt.expressions.empty()) {
+        release(line);
+        break;
+      }
+
+      const auto& target = *stmt.expressions[0];
+      auto ptr = address(target.variable, target.selectors);
+
+      if (target.type == Type::ManagedString) {
+        manageObject(Type::ManagedString, ptr, false);
+        emit("store ptr " + line.name + ", ptr " + ptr);
+        transfer(line);
+        break;
+      }
+
+      if (target.type == Type::Int32) {
+        auto parsed = instruction("call i32 @p64_parse_int32(ptr " + line.name + ", i32 " + std::to_string(target.line) + ")");
+        release(line);
+        emit("store i32 " + parsed + ", ptr " + ptr);
+        break;
+      }
+      if (target.type == Type::Int64) {
+        auto parsed = instruction("call i64 @p64_parse_int64(ptr " + line.name + ", i32 " + std::to_string(target.line) + ")");
+        release(line);
+        emit("store i64 " + parsed + ", ptr " + ptr);
+        break;
+      }
+      if (target.type.kind == Type::Real) {
+        auto parsed = instruction("call double @p64_parse_real(ptr " + line.name + ", i32 " + std::to_string(target.line) + ")");
+        release(line);
+        emit("store double " + parsed + ", ptr " + ptr);
+        break;
+      }
+      throw std::logic_error("unexpected ReadLn type");
+    }
     case Stmt::Kind::If: {
       auto condition = expression(*stmt.expressions[0]); auto yes = newLabel(), no = newLabel(), end = newLabel();
       emit("br i1 " + condition.name + ", label %" + yes + ", label %" + no);
@@ -652,6 +800,21 @@ class Generator {
       emit("br label %" + (stmt.kind == Stmt::Kind::Break ? loops.back().first : loops.back().second));
       mark(newLabel());
       break;
+    case Stmt::Kind::Exit: {
+      if (!stmt.expressions.empty()) {
+        auto value = convert(expression(*stmt.expressions[0]), current->result);
+        auto target = address(current->resultVariable);
+        if (needsManagement(current->result)) {
+          if (!value.owned) manageValue(value, true);
+          manageObject(current->result, target, false);
+        }
+        emit("store " + llvmType(value.type) + " " + value.name + ", ptr " + target);
+        transfer(value);
+      }
+      emit("br label %" + exitLabels.back());
+      mark(newLabel());
+      break;
+    }
     case Stmt::Kind::Raise: {
       auto unwind = tryHandlers.empty() ? unwindHandler : tryHandlers.back();
       auto normal = newLabel();
@@ -817,13 +980,23 @@ class Generator {
       current = &routine; reg = 0; label = 0; code.clear(); temporaries.clear(); temporaryAllocations.clear(); unwindHandler.clear();
       std::string initName = "p64_unit_init" + std::to_string(routine.id);
       auto initDebug = beginDebug(routine, routine.name + ".initialization", initName);
+      auto initExit = newLabel();
+      exitLabels.push_back(initExit);
       if (routine.body) statement(*routine.body);
+      emit("br label %" + initExit);
+      mark(initExit);
+      exitLabels.pop_back();
       emit("ret void");
       functions += "define internal void @" + initName + "() uwtable" + initDebug + " {\nentry:\n" + temporaryAllocations + code + "}\n";
       reg = 0; label = 0; code.clear(); temporaries.clear(); temporaryAllocations.clear(); unwindHandler.clear();
       std::string finiName = "p64_unit_fini" + std::to_string(routine.id);
       auto finiDebug = beginDebug(routine, routine.name + ".finalization", finiName);
+      auto finiExit = newLabel();
+      exitLabels.push_back(finiExit);
       if (routine.finalization) statement(*routine.finalization);
+      emit("br label %" + finiExit);
+      mark(finiExit);
+      exitLabels.pop_back();
       for (auto& variable : routine.variables)
         if (needsManagement(variable->type)) manageObject(variable->type, address(variable.get()), false);
       emit("ret void");
@@ -839,13 +1012,14 @@ class Generator {
     auto debugAttachment = beginDebug(routine, routine.parent ? routine.name : "main", routine.parent ? "p64fn" + std::to_string(routine.id) : "main");
     bool exceptions = usesExceptions(routine.body.get()) || usesExceptions(routine.finalization.get());
     if (exceptions) unwindHandler = newLabel();
-    std::string header = routine.parent ? "define " + llvmType(routine.result) + " @p64fn" + std::to_string(routine.id) + "(ptr %parent" : "define i32 @main(";
+    std::string header = routine.parent ? "define " + llvmType(routine.result) + " @p64fn" + std::to_string(routine.id) + "(ptr %parent" : "define i32 @main(i32 %argc, ptr %argv";
     if (routine.parent) for (size_t index = 0; index < routine.parameterCount; ++index) header += ", " + (routine.variables[index]->byReference ? "ptr" : llvmType(routine.variables[index]->type)) + " %arg" + std::to_string(index);
     header += ") uwtable";
     if (exceptions) header += " personality ptr @__gxx_personality_v0";
     header += debugAttachment + " {\nentry:\n";
     emit("%frame = alloca " + frameType(&routine));
     if (!routine.parent) emit("store ptr %frame, ptr @p64_program_frame");
+    if (!routine.parent) emit("call void @p64rt_set_args(i32 %argc, ptr %argv)");
     auto parent = instruction("getelementptr " + frameType(&routine) + ", ptr %frame, i32 0, i32 0");
     emit("store ptr " + std::string(routine.parent ? "%parent" : "null") + ", ptr " + parent);
     for (size_t index = 0; index < routine.variables.size(); ++index) {
@@ -861,7 +1035,16 @@ class Generator {
       debugVariable(routine, variable, index, ptr);
     }
     if (!routine.parent) for (auto& unit : routine.units) emit("call void @p64_unit_init" + std::to_string(unit->id) + "()");
+
+    auto exitLabel = newLabel();
+    exitLabels.push_back(exitLabel);
+
     statement(*routine.body);
+    emit("br label %" + exitLabel);
+    mark(exitLabel);
+
+    exitLabels.pop_back();
+
     if (!routine.parent) for (auto unit = routine.units.rbegin(); unit != routine.units.rend(); ++unit) emit("call void @p64_unit_fini" + std::to_string((*unit)->id) + "()");
     for (auto& variable : routine.variables) {
       if (needsManagement(variable->type) && !variable->byReference && variable.get() != routine.resultVariable)
@@ -931,9 +1114,14 @@ public:
            "declare ptr @p64_string_concat(ptr, ptr)\n" \
            "declare i32 @p64_string_compare(ptr, ptr)\n" \
            "declare void @p64_string_write(ptr)\n" \
+           "declare ptr @p64_read_line()\n" \
+           "declare i32 @p64_parse_int32(ptr, i32)\n" \
+           "declare i64 @p64_parse_int64(ptr, i32)\n" \
+           "declare double @p64_parse_real(ptr, i32)\n" \
            "declare ptr @p64_class_new(i64)\n" \
            "declare ptr @p64_class_checked(ptr, i32)\n" \
            "declare void @p64_class_free(ptr)\n" \
+           "declare void @p64rt_set_args(i32, ptr)\n" \
            "declare void @p64_raise()\n" \
            "declare i32 @__gxx_personality_v0(...)\n" \
            "declare ptr @__cxa_begin_catch(ptr)\n" \

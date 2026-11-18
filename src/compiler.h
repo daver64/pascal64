@@ -74,7 +74,7 @@ struct Selector {
   bool classField = false;
 };
 struct Expr {
-  enum class Kind { Integer, Real, Boolean, String, Nil, Name, MemberCall, NewObject, RoutineAddress, Call, Unary, Binary } kind;
+  enum class Kind { Integer, Real, Boolean, String, Nil, Name, MemberCall, CallbackCall, NewObject, RoutineAddress, Call, Unary, Binary } kind;
   std::string text;
   int line;
   Type type = Type::Void;
@@ -91,7 +91,7 @@ struct Constant {
   bool resolved = false;
 };
 struct Stmt {
-  enum class Kind { Block, Assign, Call, MethodCall, Destroy, Write, If, While, Repeat, For, Break, Continue, Try, TryFinally, Raise, Empty } kind;
+  enum class Kind { Block, Assign, Call, CallbackCall, MethodCall, Destroy, Write, ReadLn, If, While, Repeat, For, Break, Continue, Exit, Try, TryFinally, Raise, Empty } kind;
   std::string text;
   int line;
   Variable* variable = nullptr;

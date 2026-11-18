@@ -41,10 +41,28 @@ currently supported language subset.
 ./build/p64 examples/ffi_puts_demo.pas -o build/ffi_puts_demo --clang clang-18
 ./build/p64 examples/units_demo.pas -o build/units_demo --unit-path examples/units --clang clang-18
 ./build/p64 examples/files_demo.pas -o build/files_demo --unit-path units --clang clang-18
+./build/p64 examples/args_demo.pas -o build/args_demo --unit-path units --clang clang-18
+./build/p64 examples/env_demo.pas -o build/env_demo --unit-path units --clang clang-18
+```
+
+Run the arguments example:
+
+```sh
+./build/args_demo a b c
 ```
 
 The `P64Std` unit (in `units/p64std.pas`) contains small pragmatic helpers such
 as `IntToStr` and simple file input/output wrappers.
+
+The `P64Args` unit (in `units/p64args.pas`) provides basic access to program
+arguments.
+
+The `P64Env` unit (in `units/p64env.pas`) provides small environment and
+process helpers.
+
+The `P64LibC` unit (in `units/p64libc.pas`) centralizes common libc `external`
+declarations. Pascal64 currently requires each external C symbol to be declared
+only once across the full program + unit graph.
 
 The LLVM IR is retained beside the executable. Use `--emit-llvm path` to choose
 its location and `--clang path` to choose the Clang executable. The compiler
@@ -67,12 +85,12 @@ For a friendlier display in GDB, you can load the included pretty-printer:
 ## Language subset
 
 - Programs, variables, assignments, `begin`/`end`, `if`, `while`, `repeat`,
-  `for`, `break` and `continue`.
+  `for`, `break`, `continue` and `exit`.
 - `Integer` and `LongInt` use signed 32-bit storage; `Int64` and `NativeInt`
   use signed 64-bit storage. `Boolean` values are `true` and `false`.
 - `Real` values use 64-bit IEEE-754 storage.
 - `Pointer` and `PChar` hold opaque pointers and begin as `nil`. `PChar` accepts
-  string literals and can be assigned to `Pointer`; pointer values support
+  string literals and is assignable to/from `Pointer`; pointer values support
   equality comparisons but not dereferencing or arithmetic. Literal-backed
   `PChar` values point to static, NUL-terminated UTF-8 bytes.
 - `String` is an immutable, reference-counted UTF-8 byte string. String
